@@ -1,0 +1,11 @@
+# Data processing, plotting and clustering
+numpy==2.5.3
+pandas==2.3.3
+matplotlib==3.11.2
+scikit-learn==1.9.1
+threadpoolctl==3.7.0
+
+# Interactive notebook and local Jupyter interface
+ipython==9.17.1
+ipykernel==7.4.0
+jupyterlab==4.6.4

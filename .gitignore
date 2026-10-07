@@ -1,0 +1,22 @@
+# Виртуальное окружение
+.venv/
+venv/
+
+# Служебные файлы Python
+__pycache__/
+*.py[cod]
+
+# Настройки IDE
+.idea/
+.vscode/
+
+# Служебные файлы Jupyter
+.ipynb_checkpoints/
+
+# Исходный датасет
+data
+
+# Секреты и локальные настройки
+.env
+.env.*
+!.env.example
