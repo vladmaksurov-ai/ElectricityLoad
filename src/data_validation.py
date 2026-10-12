@@ -70,6 +70,7 @@ def get_time_index_quality(
     return quality
 
 
+# Подсчитывает недопустимые значения и полностью нулевые строки и столбцы.
 def get_value_quality(data: pd.DataFrame) -> pd.Series:
     """Проверяет числовые значения всего файла, а не только медианные профили."""
     values = data.to_numpy()
@@ -104,3 +105,60 @@ def calculate_zero_share(
     )
 
     return zero_share
+
+
+# Проверяет регулярную временную сетку; при необходимости требует полные календарные сутки.
+def validate_regular_time_index(
+    data: pd.Series | pd.DataFrame,
+    interval_minutes: int = 15,
+    require_complete_days: bool = False,
+) -> None:
+    if interval_minutes <= 0 or 1440 % interval_minutes:
+        raise ValueError("Шаг должен быть положительным делителем 1440 минут.")
+    index = data.index
+    if not isinstance(index, pd.DatetimeIndex) or index.empty or index.hasnans:
+        raise ValueError("Нужен непустой временной индекс без пропусков.")
+    if not index.is_monotonic_increasing or not index.is_unique:
+        raise ValueError("Временной индекс должен быть отсортирован и уникален.")
+    differences = index.to_series().diff().iloc[1:].dt.total_seconds()
+    if not differences.eq(interval_minutes * 60).all():
+        raise ValueError(f"Нарушена сетка {interval_minutes} минут.")
+    if require_complete_days:
+        expected = pd.date_range(
+            index[0].normalize(),
+            index[-1].normalize() + pd.DateOffset(days=1),
+            freq=f"{interval_minutes}min",
+            inclusive="left",
+        )
+        if not index.equals(expected):
+            raise ValueError("Ряд должен содержать только полные календарные сутки.")
+        counts = data.groupby(index.normalize()).size()
+        if not counts.eq(1440 // interval_minutes).all():
+            raise ValueError("Есть неполные сутки или переходы часового пояса.")
+
+
+# Переиспользует диагностики EDA и останавливает подготовку ML при дефектах исходных данных.
+def validate_ml_source_data(
+    data: pd.DataFrame,
+    interval_minutes: int = 15,
+    min_intervals: int = 96,
+) -> pd.Series:
+    validate_regular_time_index(data, interval_minutes)
+    if len(data) <= min_intervals or data.shape[1] == 0:
+        raise ValueError("Недостаточно данных для суточного прогноза.")
+    if not all(pd.api.types.is_numeric_dtype(dtype) for dtype in data.dtypes):
+        raise ValueError("Клиентские столбцы должны быть числовыми.")
+    time_quality = get_time_index_quality(data)
+    value_quality = get_value_quality(data)
+    if value_quality["duplicate_client_names"]:
+        raise ValueError("Есть повторяющиеся имена клиентов.")
+    if value_quality["nonfinite_values"]:
+        raise ValueError("Есть NaN или бесконечные значения.")
+    if value_quality["negative_values"]:
+        raise ValueError("Есть отрицательная мощность.")
+    return pd.Series({
+        "missing_values": time_quality["missing_values"],
+        "duplicate_timestamps": time_quality["duplicate_dates"],
+        "zero_values": int(data.eq(0).sum().sum()),
+        **value_quality.to_dict(),
+    }, name="quality")
