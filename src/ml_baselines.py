@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from .data_validation import validate_regular_time_index
+from .data_validation import validate_power_series
 
 
 METHOD_LABELS = {
@@ -13,17 +13,6 @@ METHOD_LABELS = {
 }
 METRIC_LABELS = {"mae_kw": "MAE, кВт", "rmse_kw": "RMSE, кВт", "wape_pct": "WAPE, %"}
 SOURCE_COLUMNS = [f"{method}_source" for method in METHOD_LABELS]
-
-
-# Проверяет числовой ряд мощности, не исправляя пропуски или исходные значения.
-def _validate_power(power: pd.Series, interval_minutes: int, complete_days=False):
-    if not isinstance(power, pd.Series):
-        raise ValueError("Нужен одномерный ряд мощности.")
-    validate_regular_time_index(power, interval_minutes, require_complete_days=complete_days)
-    if power.index.tz is not None:
-        raise ValueError("Используйте исходные локальные метки без часового пояса.")
-    if not np.isfinite(power.to_numpy(dtype=float)).all() or power.lt(0).any():
-        raise ValueError("Мощность должна быть конечной и неотрицательной.")
 
 
 # Строит сутки по проверенной истории, сохраняя контроль доступности каждого источника.
@@ -65,7 +54,7 @@ def forecast_next_day(
     forecast_day: str | pd.Timestamp,
     interval_minutes: int = 15,
 ) -> pd.DataFrame:
-    _validate_power(history, interval_minutes)
+    validate_power_series(history, interval_minutes)
     return _forecast_from_checked_history(history, forecast_day, interval_minutes)
 
 
@@ -75,8 +64,8 @@ def backtest_baselines(
     validation: pd.Series,
     interval_minutes: int = 15,
 ) -> pd.DataFrame:
-    _validate_power(history, interval_minutes)
-    _validate_power(validation, interval_minutes, complete_days=True)
+    validate_power_series(history, interval_minutes)
+    validate_power_series(validation, interval_minutes, complete_days=True)
     if history.index[-1] != validation.index[0] - pd.Timedelta(minutes=interval_minutes):
         raise ValueError("История и валидация должны граничить без разрывов и пересечений.")
     # Для этих методов достаточно последних семи суток; весь вход уже проверен выше.

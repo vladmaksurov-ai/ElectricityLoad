@@ -137,6 +137,21 @@ def validate_regular_time_index(
             raise ValueError("Есть неполные сутки или переходы часового пояса.")
 
 
+# Проверяет ряд мощности для базовых прогнозов и признаков ML без исправления значений.
+def validate_power_series(
+    power: pd.Series,
+    interval_minutes: int = 15,
+    complete_days: bool = False,
+) -> None:
+    if not isinstance(power, pd.Series):
+        raise ValueError("Нужен одномерный ряд мощности.")
+    validate_regular_time_index(power, interval_minutes, require_complete_days=complete_days)
+    if power.index.tz is not None:
+        raise ValueError("Используйте исходные локальные метки без часового пояса.")
+    if not np.isfinite(power.to_numpy(dtype=float)).all() or power.lt(0).any():
+        raise ValueError("Мощность должна быть конечной и неотрицательной.")
+
+
 # Переиспользует диагностики EDA и останавливает подготовку ML при дефектах исходных данных.
 def validate_ml_source_data(
     data: pd.DataFrame,

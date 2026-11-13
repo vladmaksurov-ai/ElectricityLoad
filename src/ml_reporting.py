@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .ml_baselines import METHOD_LABELS, METRIC_LABELS
+from .ml_boosting import BOOSTING_LABEL, BOOSTING_METHOD, BoostingExperiment
 from .visualizations import PRIMARY_COLOR, SECONDARY_COLOR, SUPPORT_COLOR
 
 
@@ -41,12 +42,14 @@ def plot_day_forecast(day_forecast: pd.DataFrame):
 
 
 # Разносит ошибки в кВт и процентах по отдельным осям с общей сортировкой по MAE.
-def plot_baseline_comparison(metrics: pd.DataFrame, start, end):
+def plot_baseline_comparison(metrics: pd.DataFrame, start, end, *, method_labels=None, method_colors=None):
+    method_labels = METHOD_LABELS if method_labels is None else method_labels
+    method_colors = METHOD_COLORS if method_colors is None else method_colors
     fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True, constrained_layout=True)
     positions = np.arange(len(metrics))
     for ax, (metric, label) in zip(axes, METRIC_LABELS.items()):
         values = metrics[metric]
-        bars = ax.barh(positions, values, color=[METHOD_COLORS[m] for m in metrics.index])
+        bars = ax.barh(positions, values, color=[method_colors[m] for m in metrics.index])
         ax.bar_label(bars, labels=[f"{v:,.2f}" if pd.notna(v) else "не определён"
                                    for v in values], padding=5)
         ax.set_xlabel(label)
@@ -54,7 +57,7 @@ def plot_baseline_comparison(metrics: pd.DataFrame, start, end):
         ax.grid(axis="x", alpha=0.4)
         ax.set_axisbelow(True)
         ax.spines[["top", "right"]].set_visible(False)
-    axes[0].set_yticks(positions, [METHOD_LABELS[m] for m in metrics.index])
+    axes[0].set_yticks(positions, [method_labels[m] for m in metrics.index])
     axes[0].invert_yaxis()
     fig.suptitle(f"Валидация {start:%d.%m.%Y}–{end:%d.%m.%Y}: меньше — лучше")
     return fig, axes
@@ -122,10 +125,81 @@ def format_validation_conclusions(metrics: pd.DataFrame, forecasts: pd.DataFrame
         lines.append("**WAPE не определён:** сумма абсолютных фактических значений равна нулю.")
     lines.append(
         f"**Ориентир для следующего шага — «{METHOD_LABELS[best]}».** "
-        "Будущую ML-модель сравним с ним на той же валидации, с теми же "
+        "ML-модель сравниваем с ним на той же валидации, с теми же "
         "ежедневными точками старта и горизонтом 96 интервалов; основной критерий — MAE, "
         "дополнительно RMSE и WAPE. Тест июля–декабря не участвовал в оценке "
         "и выборе метода. Результат января–июня сам по себе не гарантирует "
-        "такое же качество в другом сезоне; обучаемая модель ещё не добавлена."
+        "такое же качество в другом сезоне."
     )
     return "\n\n".join(lines)
+
+
+# Переиспользует общий график метрик для сравнения трёх ориентиров и первой ML-модели.
+def plot_boosting_comparison(experiment: BoostingExperiment):
+    return plot_baseline_comparison(
+        experiment.comparison, experiment.predictions.index[0], experiment.predictions.index[-1],
+        method_labels={**METHOD_LABELS, BOOSTING_METHOD: BOOSTING_LABEL},
+        method_colors={**METHOD_COLORS, BOOSTING_METHOD: PRIMARY_COLOR},
+    )
+
+
+# Показывает, как ежедневная ошибка модели соотносится с лучшим базовым методом.
+def plot_boosting_daily_errors(experiment: BoostingExperiment):
+    baseline = experiment.comparison.loc[list(METHOD_LABELS), "mae_kw"].idxmin()
+    daily = experiment.daily_mae
+    fig, ax = plt.subplots(figsize=(11, 4), constrained_layout=True)
+    ax.plot(daily.index, daily[baseline], label=METHOD_LABELS[baseline],
+            color=METHOD_COLORS[baseline], linestyle="--", linewidth=1.4)
+    ax.plot(daily.index, daily[BOOSTING_METHOD], label=BOOSTING_LABEL,
+            color=PRIMARY_COLOR, linewidth=1.5)
+    ax.set(title=f"Суточный MAE: {daily.index[0]:%d.%m.%Y}–{daily.index[-1]:%d.%m.%Y}",
+           xlabel="Дата прогноза; каждый день содержит 96 интервалов", ylabel="MAE, кВт", ylim=(0, None))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m.%Y"))
+    ax.grid(axis="y", alpha=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend()
+    return fig, ax
+
+
+# Формирует честный итог третьего опыта по выполненным расчётам, включая ухудшение качества.
+def format_boosting_conclusions(experiment: BoostingExperiment) -> str:
+    comparison = experiment.comparison
+    baseline = comparison.loc[list(METHOD_LABELS), "mae_kw"].idxmin()
+    model_metrics, baseline_metrics = comparison.loc[BOOSTING_METHOD], comparison.loc[baseline]
+    labels = {**METHOD_LABELS, BOOSTING_METHOD: BOOSTING_LABEL}
+    best = comparison["mae_kw"].idxmin()
+    difference = baseline_metrics.mae_kw - model_metrics.mae_kw
+    if baseline_metrics.mae_kw > 0:
+        direction = "ниже" if difference > 0 else "выше" if difference < 0 else "такой же"
+        change = f"{direction} на {abs(difference) / baseline_metrics.mae_kw * 100:.2f}%"
+    else:
+        change = "также нулевой" if model_metrics.mae_kw == 0 else "выше нулевой ошибки базового метода"
+    summary = experiment.training_summary
+    wins = int((experiment.daily_mae[BOOSTING_METHOD] < experiment.daily_mae[baseline]).sum())
+    wape = f"{model_metrics.wape_pct:.2f}%" if pd.notna(model_metrics.wape_pct) else "не определён"
+    return "\n\n".join([
+        f"**Вывод эксперимента 3.** {BOOSTING_LABEL} обучен один раз на "
+        f"**{summary['Обучающих интервалов']:,} интервалах**, "
+        f"{summary['Начало обучающих целей']:%d.%m.%Y}–{summary['Конец обучающих целей']:%d.%m.%Y}, "
+        f"использовано **{len(experiment.feature_names)} признаков**. "
+        "Первые семь суток обучения нужны для истории. Веса модели на валидации не обновлялись; "
+        "обновлялись только признаки по завершившимся дням.",
+        f"**MAE модели — {model_metrics.mae_kw:,.2f} кВт**; у лучшего базового метода "
+        f"«{METHOD_LABELS[baseline]}» — **{baseline_metrics.mae_kw:,.2f} кВт**. "
+        f"MAE модели {change}. По главному критерию сейчас лучший результат "
+        f"у **«{labels[best]}»**.",
+        f"**RMSE модели — {model_metrics.rmse_kw:,.2f} кВт**, "
+        f"у базового метода — {baseline_metrics.rmse_kw:,.2f} кВт. "
+        "RMSE сильнее учитывает крупные промахи, поэтому его оцениваем отдельно от MAE. "
+        f"**WAPE модели — {wape}**: отношение сумм ошибок и абсолютного факта "
+        "по всем интервалам, без усреднения суточных процентов.",
+        f"Модель дала меньший суточный MAE в **{wins} из {len(experiment.daily_mae)} дней**. "
+        "Суточный график помогает увидеть периоды расхождений; победителя выбираем "
+        "по общей ошибке на всех одинаковых интервалах.",
+        "Это один заранее заданный набор признаков и параметров без поиска по валидации. "
+        "Ранняя остановка со случайным разделением отключена. Тест июля–декабря не "
+        "использовался ни при обучении, ни при сравнении. Следующий шаг — разобрать "
+        "периоды крупных ошибок и проверить обоснованное изменение признаков или модели "
+        "на том же протоколе; тест остаётся для итоговой проверки.",
+    ])
