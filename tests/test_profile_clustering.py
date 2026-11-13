@@ -14,6 +14,8 @@ from src.profile_clustering import (
     cluster_representatives,
     compare_cluster_counts,
     fit_profile_clusters,
+    get_client_typical_profiles,
+    get_history_threshold_sensitivity,
     summarize_profile_clusters,
     validate_features,
 )
@@ -59,6 +61,57 @@ class ProfileClusteringTests(unittest.TestCase):
             validate_features(invalid)
         with self.assertRaises(ValueError):
             validate_features(self.features * 2)
+
+    # Аудит и чувствительность должны одинаково учитывать каждую причину исключения.
+    def test_threshold_sensitivity_matches_audit_for_all_exclusion_reasons(self):
+        index = pd.date_range("2024-01-01 00:15", periods=3 * 96, freq="15min")
+        active = pd.DataFrame(1.0, index=index, columns=[
+            "good", "short", "missing", "infinite", "negative", "zero", "empty",
+        ])
+        active.loc[index[96:], "short"] = np.nan
+        active.loc[index[::96], "missing"] = np.nan
+        active.loc[index[1::96], "infinite"] = np.inf
+        active.loc[index[2::96], "negative"] = -1.0
+        active["zero"] = 0.0
+        active["empty"] = np.nan
+        profiles = get_client_typical_profiles(active)
+        quality = audit_profile_quality(active, profiles, min_complete_days=2)
+        before = quality.copy(deep=True)
+        thresholds = (0, 2, 4)
+        sensitivity = get_history_threshold_sensitivity(quality, thresholds)
+        self.assertEqual(sensitivity.included_clients.tolist(), [2, 1, 0])
+        for threshold, count in zip(thresholds, sensitivity.included_clients):
+            with self.subTest(threshold=threshold):
+                audit = audit_profile_quality(active, profiles, min_complete_days=threshold)
+                self.assertEqual(count, int(audit.included.sum()))
+                pd.testing.assert_series_equal(audit.included, audit.exclusion_reason.eq(""),
+                                               check_names=False)
+        self.assertIn("бесконечные значения", quality.loc["infinite", "exclusion_reason"])
+        self.assertNotIn("бесконечные значения", quality.loc["missing", "exclusion_reason"])
+        self.assertIn("отрицательный профиль", quality.loc["negative", "exclusion_reason"])
+        self.assertIn("нулевой медианный профиль", quality.loc["zero", "exclusion_reason"])
+        self.assertIn("нет наблюдений", quality.loc["empty", "exclusion_reason"])
+        pd.testing.assert_frame_equal(quality, before)
+
+    # Нельзя включать клиента без исходных наблюдений только из-за заполненного профиля.
+    def test_sensitivity_keeps_clients_without_observations_excluded(self):
+        index = pd.date_range("2024-01-01 00:15", periods=96, freq="15min")
+        active = pd.DataFrame(np.nan, index=index, columns=["empty"])
+        profiles = pd.DataFrame(1.0, index=active.columns, columns=range(96))
+        quality = audit_profile_quality(active, profiles, min_complete_days=0)
+        self.assertFalse(quality.loc["empty", "included"])
+        self.assertEqual(get_history_threshold_sensitivity(quality, (0,)).included_clients.iloc[0], 0)
+
+    # Оба пути отвергают отрицательный порог вместо разных правил включения.
+    def test_audit_and_sensitivity_reject_negative_history_threshold(self):
+        index = pd.date_range("2024-01-01 00:15", periods=96, freq="15min")
+        active = pd.DataFrame(1.0, index=index, columns=["good"])
+        profiles = get_client_typical_profiles(active)
+        quality = audit_profile_quality(active, profiles, min_complete_days=0)
+        with self.assertRaises(ValueError):
+            audit_profile_quality(active, profiles, min_complete_days=-1)
+        with self.assertRaises(ValueError):
+            get_history_threshold_sensitivity(quality, (-1,))
 
     def test_constant_profiles_have_no_valid_k(self):
         constant = pd.DataFrame(1.0, index=range(5), columns=range(96))

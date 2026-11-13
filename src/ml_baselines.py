@@ -26,13 +26,12 @@ def _validate_power(power: pd.Series, interval_minutes: int, complete_days=False
         raise ValueError("Мощность должна быть конечной и неотрицательной.")
 
 
-# Строит сразу весь следующий день; история обязана закончиться до точки старта.
-def forecast_next_day(
+# Строит сутки по проверенной истории, сохраняя контроль доступности каждого источника.
+def _forecast_from_checked_history(
     history: pd.Series,
     forecast_day: str | pd.Timestamp,
     interval_minutes: int = 15,
 ) -> pd.DataFrame:
-    _validate_power(history, interval_minutes)
     origin = pd.Timestamp(forecast_day)
     if pd.isna(origin) or origin.tzinfo is not None or origin != origin.normalize():
         raise ValueError("Прогноз должен начинаться в 00:00 локальных суток.")
@@ -60,6 +59,16 @@ def forecast_next_day(
     return result
 
 
+# Проверяет внешнюю историю целиком перед самостоятельным прогнозом следующих суток.
+def forecast_next_day(
+    history: pd.Series,
+    forecast_day: str | pd.Timestamp,
+    interval_minutes: int = 15,
+) -> pd.DataFrame:
+    _validate_power(history, interval_minutes)
+    return _forecast_from_checked_history(history, forecast_day, interval_minutes)
+
+
 # Ежедневно прогнозирует валидацию, добавляя фактический день в историю после прогноза.
 def backtest_baselines(
     history: pd.Series,
@@ -70,15 +79,17 @@ def backtest_baselines(
     _validate_power(validation, interval_minutes, complete_days=True)
     if history.index[-1] != validation.index[0] - pd.Timedelta(minutes=interval_minutes):
         raise ValueError("История и валидация должны граничить без разрывов и пересечений.")
-    observed = history.copy()
+    # Для этих методов достаточно последних семи суток; весь вход уже проверен выше.
+    history_intervals = 7 * (1440 // interval_minutes)
+    observed = history.iloc[-history_intervals:].copy()
     forecasts = []
     for day, actual_day in validation.groupby(validation.index.normalize(), sort=True):
-        forecast = forecast_next_day(observed, day, interval_minutes)
+        forecast = _forecast_from_checked_history(observed, day, interval_minutes)
         if not forecast.index.equals(actual_day.index):
             raise AssertionError("Для всех методов нужны одинаковые интервалы оценки.")
         forecast["actual_kw"] = actual_day
         forecasts.append(forecast)
-        observed = pd.concat([observed, actual_day])
+        observed = pd.concat([observed, actual_day]).iloc[-history_intervals:]
     result = pd.concat(forecasts)
     if not result.index.equals(validation.index):
         raise AssertionError("Прогнозы должны покрывать всю валидацию без потерь.")

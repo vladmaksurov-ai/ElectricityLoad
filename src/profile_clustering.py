@@ -53,16 +53,29 @@ def prepare_clustering_features(active_data, profiles, normalized_profiles,
     return profile_quality, excluded_profiles, features
 
 
+# Задаёт единые причины исключения для аудита и сравнения порогов истории.
+def _get_profile_exclusions(profile_quality, min_complete_days):
+    if min_complete_days < 0:
+        raise ValueError("Минимальное число дней не может быть отрицательным.")
+    return pd.DataFrame({
+        "нет наблюдений": profile_quality["observed_intervals"].eq(0),
+        "пропущенные слоты": profile_quality["missing_slots"].gt(0),
+        "бесконечные значения": (
+            profile_quality["nonfinite_slots"] > profile_quality["missing_slots"]
+        ),
+        "отрицательный профиль": profile_quality["negative_slots"].gt(0),
+        "нулевой медианный профиль": profile_quality["profile_mean_kw"].eq(0),
+        "недостаточно полных дней": profile_quality["complete_days"].lt(min_complete_days),
+    }, index=profile_quality.index)
+
+
 def get_history_threshold_sensitivity(profile_quality, thresholds=(0, 7, 30, 90)):
     """Проверяет прежние условия включения при разных порогах полных дней."""
     return pd.DataFrame([
         {
             "min_complete_days": threshold,
             "included_clients": int((
-                profile_quality["complete_days"].ge(threshold)
-                & profile_quality["nonfinite_slots"].eq(0)
-                & profile_quality["negative_slots"].eq(0)
-                & profile_quality["profile_mean_kw"].gt(0)
+                ~_get_profile_exclusions(profile_quality, threshold).any(axis=1)
             ).sum()),
         }
         for threshold in thresholds
@@ -134,21 +147,14 @@ def audit_profile_quality(active_data, profiles, min_complete_days=30):
     audit["negative_slots"] = profiles.lt(0).sum(axis=1)
     audit["zero_slots"] = profiles.eq(0).sum(axis=1)
     audit["profile_mean_kw"] = profiles.mean(axis=1)
-    audit["insufficient_history"] = audit["complete_days"].lt(min_complete_days)
     # Причины собираются независимо: один клиент может нарушать несколько условий.
-    reasons = {
-        "нет наблюдений": audit["observed_intervals"].eq(0),
-        "пропущенные слоты": audit["missing_slots"].gt(0),
-        "бесконечные значения": np.isinf(values).any(axis=1),
-        "отрицательный профиль": audit["negative_slots"].gt(0),
-        "нулевой медианный профиль": audit["profile_mean_kw"].eq(0),
-        "недостаточно полных дней": audit["insufficient_history"],
-    }
+    reasons = _get_profile_exclusions(audit, min_complete_days)
+    audit["insufficient_history"] = reasons["недостаточно полных дней"]
     audit["exclusion_reason"] = [
         "; ".join(name for name, mask in reasons.items() if np.asarray(mask)[i])
         for i in range(len(audit))
     ]
-    audit["included"] = audit["exclusion_reason"].eq("")
+    audit["included"] = ~reasons.any(axis=1)
     return audit
 
 

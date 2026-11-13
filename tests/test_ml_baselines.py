@@ -93,6 +93,36 @@ class BaselineForecastTests(unittest.TestCase):
         np.testing.assert_array_equal(changed.previous_week.iloc[7 * 96:8 * 96],
                                       original.previous_week.iloc[7 * 96:8 * 96] + 1000)
 
+    # Проверяет месячную оценку после нескольких обновлений недельного окна при разном шаге.
+    def test_rolling_history_matches_independent_sources_over_multiple_weeks(self):
+        for interval_minutes in (15, 30, 60):
+            with self.subTest(interval_minutes=interval_minutes):
+                per_day = 1440 // interval_minutes
+                index = pd.date_range("2013-12-01", periods=40 * per_day,
+                                      freq=f"{interval_minutes}min", name="timestamp")
+                power = pd.Series(10 + np.arange(len(index), dtype=float) ** 1.3, index=index)
+                history, validation = power.iloc[:10 * per_day], power.iloc[10 * per_day:]
+                forecasts = backtest_baselines(history, validation, interval_minutes)
+                sources = {
+                    "last_value": forecasts.forecast_origin - pd.Timedelta(minutes=interval_minutes),
+                    "previous_day": forecasts.index - pd.Timedelta(days=1),
+                    "previous_week": forecasts.index - pd.Timedelta(days=7),
+                }
+                self.assertTrue(forecasts.index.equals(validation.index))
+                for method, timestamps in sources.items():
+                    np.testing.assert_array_equal(forecasts[method], power.reindex(timestamps))
+                    self.assertTrue((forecasts[f"{method}_source"] == timestamps).all())
+
+    # Ограничение рабочего окна не должно скрывать дефекты в более старой входной истории.
+    def test_old_history_is_validated_before_trimming(self):
+        for value in (np.nan, np.inf, -1):
+            invalid = self.history.copy()
+            invalid.iloc[0] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                backtest_baselines(invalid, self.validation)
+        with self.assertRaises(ValueError):
+            backtest_baselines(self.history.drop(self.history.index[1]), self.validation)
+
     # Не допускает тихого исключения неудобных интервалов из общей оценки методов.
     def test_incomplete_invalid_or_overlapping_validation_is_rejected(self):
         invalid_series = [self.validation.iloc[1:], self.validation.drop(self.validation.index[100]),
